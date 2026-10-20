@@ -250,13 +250,24 @@ Rather than reinventing test patterns from scratch, reference these canonical, h
 - **Reference**: [`cli/src/commands/__tests__/completion-install.test.ts`](../../cli/src/commands/__tests__/completion-install.test.ts) and [`cli/src/commands/__tests__/flag-contract.test.ts`](../../cli/src/commands/__tests__/flag-contract.test.ts)
 - **Why this pattern is valuable**:
   - Tests CLI commands and argument contracts without running full integration suites or modifying the host shell environment (`~/.bashrc`, `~/.zshrc`).
-  - Mocks `node:os` homedir and captures console stdout/stderr while operating entirely within a temporary scratch directory (`mkdtempSync`).
+  - Mocks `node:os` homedir and captures console stdout/stderr while operating entirely within a temporary scratch directory (`mkdtempSync`), cleaning up in `afterEach`.
 - **Key pattern snippet**:
   ```ts
   const home = vi.hoisted(() => ({ dir: "" }));
   vi.mock("node:os", async (importOriginal) => {
     const actual = await importOriginal<typeof import("node:os")>();
     return { ...actual, homedir: () => home.dir };
+  });
+
+  let workDir: string;
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tmpdir(), "tdk-completion-"));
+    home.dir = join(workDir, "home");
+    mkdirSync(home.dir, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(workDir, { recursive: true, force: true });
   });
 
   it("installs the bash script under ~/.bash_completion.d and prints the source line", async () => {
@@ -267,16 +278,23 @@ Rather than reinventing test patterns from scratch, reference these canonical, h
   });
   ```
 
-### Pattern 3: Golden-file and template generator tests
-- **Reference**: [`cli/src/utils/__tests__/golden-build-tilt.test.ts`](../../cli/src/utils/__tests__/golden-build-tilt.test.ts) and [`cli/src/commands/__tests__/frontend-vite-generator.test.ts`](../../cli/src/commands/__tests__/frontend-vite-generator.test.ts)
+### Pattern 3: Hermetic generator unit tests vs. tool-backed golden tests
+- **Reference**: [`cli/src/commands/__tests__/frontend-vite-generator.test.ts`](../../cli/src/commands/__tests__/frontend-vite-generator.test.ts) (hermetic generator unit test) and [`cli/src/utils/__tests__/golden-build-tilt.test.ts`](../../cli/src/utils/__tests__/golden-build-tilt.test.ts) (tool-backed Tilt integration test)
 - **Why this pattern is valuable**:
-  - Code generators for Dockerfile, Tiltfile, and Starlark configurations must produce stable, deterministic outputs across build configurations.
-  - Verifies exact directive presence (`FROM scratch`, `GOLDEN_IMAGE_RESOURCE = Infra.load_all(...)`) and structural snapshot fidelity without invoking slow remote registries or container engines.
+  - Distinguishes hermetic unit tests that evaluate generator logic and Starlark templates in-memory without spawning container engines, from tool-backed integration suites that test Tilt-generated shell scripts against a mock Docker executable on PATH.
+  - Verifies exact directive presence (`FROM scratch`, `GOLDEN_IMAGE_RESOURCE = Infra.load_all(...)`) and structural snapshot fidelity across different service configurations.
 - **Key pattern snippet**:
   ```ts
-  const GOLDEN_DOCKERFILE = ".tdk/.tdk-out/golden-layers.Dockerfile";
-  const DOCKERFILE_TEXT = "# golden test Dockerfile\nFROM scratch\n";
+  // Hermetic generator unit test: evaluates Starlark templates in memory
+  it("generates deterministic vite frontend definitions", async () => {
+    const result = await evaluateStarlark(frontendGenerator, {
+      project_name: "my-app",
+      port: 3000,
+    });
+    expect(result.stdout).toContain("vite_frontend");
+  });
 
+  // Tool-backed golden build test: exercises generated script against fake docker
   it("checks the skip, bake, version-gate and serial-fallback paths", () => {
     const script = generatedGoldenScript();
     const result = runGolden(script, { labelMatches: true });
@@ -285,14 +303,20 @@ Rather than reinventing test patterns from scratch, reference these canonical, h
   ```
 
 ### Pattern 4: Error-path and edge-case coverage
-- **Reference**: [`cli/src/commands/__tests__/project-root-errors.test.ts`](../../cli/src/commands/__tests__/project-root-errors.test.ts) and [`cli/src/commands/__tests__/error-handling.test.ts`](../../cli/src/commands/__tests__/error-handling.test.ts)
+- **Reference**: [`cli/src/commands/__tests__/error-handling.test.ts`](../../cli/src/commands/__tests__/error-handling.test.ts) (in-process unit error tests) and [`cli/src/commands/__tests__/project-root-errors.test.ts`](../../cli/src/commands/__tests__/project-root-errors.test.ts) (subprocess CLI entrypoint test)
 - **Why this pattern is valuable**:
-  - Critical systems must not panic, crash with unhandled promise rejections, or leak raw stack traces to users.
-  - Systematically exercises missing configuration files, corrupted JSON syntax, and permission denied errors, asserting typed error envelopes and user-actionable remediation messages.
+  - Pure unit error tests (`error-handling.test.ts`) assert typed exceptions, rejection reasons, and input validation in sub-millisecond execution without spawning processes.
+  - As an explicit documented exception, CLI process tests (`project-root-errors.test.ts`) use `spawnSync` on the compiled `tdk.js` binary to assert that unhandled exceptions do not leak raw stack traces to the user and that consistent human-readable errors and exit codes (exit 1) are returned across commands outside a project root.
 - **Key pattern snippet**:
   ```ts
-  const commands = ["projects", "resources", "stacks", "networks"] as const;
+  // In-process unit error validation:
+  it("rejects invalid resource names with actionable error message", () => {
+    const result = validateResourceName("Invalid_Name!");
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain("lowercase letters, numbers, and hyphens only");
+  });
 
+  // CLI entrypoint error test (subprocess exception):
   it("uses identical human-readable errors across project commands", () => {
     const results = commands.map((command) => runOutsideProject([command]));
     expect(results.map((result) => result.status)).toEqual([1, 1, 1, 1]);
