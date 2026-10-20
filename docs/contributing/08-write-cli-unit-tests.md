@@ -221,11 +221,82 @@ When validating code generators (such as Dockerfiles, Tiltfiles, or Vite configs
 
 ---
 
-## 6. Recommended references
+## 6. High-value unit test patterns in the codebase
 
-For existing patterns in the codebase, consult:
-- **Command & flag contracts**: [`cli/src/commands/__tests__/completion-install.test.ts`](../../cli/src/commands/__tests__/completion-install.test.ts)
-- **Path & validation logic**: [`cli/src/utils/__tests__/paths.test.ts`](../../cli/src/utils/__tests__/paths.test.ts)
-- **Temporary projects & file operations**: [`cli/src/utils/__tests__/services.test.ts`](../../cli/src/utils/__tests__/services.test.ts)
-- **Mocks & subprocesses**: [`cli/src/commands/__tests__/upgrade.test.ts`](../../cli/src/commands/__tests__/upgrade.test.ts)
-- **Template generation**: [`cli/src/generator/__tests__/template-engine.test.ts`](../../cli/src/generator/__tests__/template-engine.test.ts)
+Rather than reinventing test patterns from scratch, reference these canonical, high-value unit test suites across the repository. Each exemplifies a specific testing approach that maximizes confidence while keeping execution fast and hermetic.
+
+### Pattern 1: Pure utility test with parameterization and table-driven cases
+- **Reference**: [`cli/src/utils/__tests__/validation.test.ts`](../../cli/src/utils/__tests__/validation.test.ts) and [`cli/src/utils/__tests__/paths.test.ts`](../../cli/src/utils/__tests__/paths.test.ts)
+- **Why this pattern is valuable**:
+  - Tests pure path algorithms, kebab-case rules, and schema validators in sub-millisecond execution.
+  - Leverages table-driven `it.each` to exhaustively test happy paths, directory-traversal exploits (`../secret`, `a/../../b`), empty strings, and malformed characters.
+  - Leaves zero state behind by never touching real disk I/O.
+- **Key pattern snippet**:
+  ```ts
+  describe("validateResourceName", () => {
+    it.each([
+      ["hyphenated", "my-service"],
+      ["letters and digits", "service123"],
+      ["hyphenated gateway", "api-gateway"],
+      ["single letter", "a"],
+      ["digits and hyphens", "test-123-abc"],
+    ])("should validate correct kebab-case name (%s): %s", (_label, name) => {
+      expect(validateResourceName(name)).toEqual({ valid: true });
+    });
+  });
+  ```
+
+### Pattern 2: Command test avoiding full E2E
+- **Reference**: [`cli/src/commands/__tests__/completion-install.test.ts`](../../cli/src/commands/__tests__/completion-install.test.ts) and [`cli/src/commands/__tests__/flag-contract.test.ts`](../../cli/src/commands/__tests__/flag-contract.test.ts)
+- **Why this pattern is valuable**:
+  - Tests CLI commands and argument contracts without running full integration suites or modifying the host shell environment (`~/.bashrc`, `~/.zshrc`).
+  - Mocks `node:os` homedir and captures console stdout/stderr while operating entirely within a temporary scratch directory (`mkdtempSync`).
+- **Key pattern snippet**:
+  ```ts
+  const home = vi.hoisted(() => ({ dir: "" }));
+  vi.mock("node:os", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("node:os")>();
+    return { ...actual, homedir: () => home.dir };
+  });
+
+  it("installs the bash script under ~/.bash_completion.d and prints the source line", async () => {
+    const { stdout } = await runCompletion(["bash", "--install"]);
+    const installPath = join(home.dir, ".bash_completion.d", "tdk-completion.bash");
+    expect(readFileSync(installPath, "utf-8")).toContain("complete -F _tdk_completions tdk");
+    expect(stdout).toContain("Installed bash completion to:");
+  });
+  ```
+
+### Pattern 3: Golden-file and template generator tests
+- **Reference**: [`cli/src/utils/__tests__/golden-build-tilt.test.ts`](../../cli/src/utils/__tests__/golden-build-tilt.test.ts) and [`cli/src/commands/__tests__/frontend-vite-generator.test.ts`](../../cli/src/commands/__tests__/frontend-vite-generator.test.ts)
+- **Why this pattern is valuable**:
+  - Code generators for Dockerfile, Tiltfile, and Starlark configurations must produce stable, deterministic outputs across build configurations.
+  - Verifies exact directive presence (`FROM scratch`, `GOLDEN_IMAGE_RESOURCE = Infra.load_all(...)`) and structural snapshot fidelity without invoking slow remote registries or container engines.
+- **Key pattern snippet**:
+  ```ts
+  const GOLDEN_DOCKERFILE = ".tdk/.tdk-out/golden-layers.Dockerfile";
+  const DOCKERFILE_TEXT = "# golden test Dockerfile\nFROM scratch\n";
+
+  it("checks the skip, bake, version-gate and serial-fallback paths", () => {
+    const script = generatedGoldenScript();
+    const result = runGolden(script, { labelMatches: true });
+    expect(result.built).toBe(false);
+  });
+  ```
+
+### Pattern 4: Error-path and edge-case coverage
+- **Reference**: [`cli/src/commands/__tests__/project-root-errors.test.ts`](../../cli/src/commands/__tests__/project-root-errors.test.ts) and [`cli/src/commands/__tests__/error-handling.test.ts`](../../cli/src/commands/__tests__/error-handling.test.ts)
+- **Why this pattern is valuable**:
+  - Critical systems must not panic, crash with unhandled promise rejections, or leak raw stack traces to users.
+  - Systematically exercises missing configuration files, corrupted JSON syntax, and permission denied errors, asserting typed error envelopes and user-actionable remediation messages.
+- **Key pattern snippet**:
+  ```ts
+  const commands = ["projects", "resources", "stacks", "networks"] as const;
+
+  it("uses identical human-readable errors across project commands", () => {
+    const results = commands.map((command) => runOutsideProject([command]));
+    expect(results.map((result) => result.status)).toEqual([1, 1, 1, 1]);
+    expect(new Set(results.map((result) => result.stderr)).size).toBe(1);
+    expect(results[0].stderr).toContain("initialize a new project");
+  });
+  ```
