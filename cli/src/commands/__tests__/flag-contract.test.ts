@@ -473,4 +473,3 @@ describe("flag contract: unknown flag handling", () => {
     }
   });
 });
-
