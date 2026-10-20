@@ -3,12 +3,12 @@
 import { describe, expect, it } from "vitest";
 import { hostUpRefusal } from "../../commands/up.js";
 import {
-  detectHost,
   DEVCONTAINER_DOCKER_FIX,
+  detectHost,
+  type HostProbeInputs,
   isContainerHost,
   WEBCONTAINER_DOCS,
   WEBCONTAINER_UP_MESSAGE,
-  type HostProbeInputs,
 } from "../agent-host.js";
 import { createDoctorReport } from "../doctor-report.js";
 
