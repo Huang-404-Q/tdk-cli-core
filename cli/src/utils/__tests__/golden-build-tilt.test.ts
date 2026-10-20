@@ -106,7 +106,7 @@ case "$1" in
     ;;
   image)
     if [ "$2" = inspect ]; then
-      img="$4"
+      img="$5"
       if [ -n "$FAKE_MISSING_IMAGES" ]; then
         for m in $FAKE_MISSING_IMAGES; do
           if [ "$img" = "$m" ]; then exit 1; fi
